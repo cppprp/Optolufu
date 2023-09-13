@@ -14,9 +14,6 @@ grid_size_cols = encoding_line_length
 fps = 100
 start_frame = 0
 
-# TODO fixe the weird png saving in the reference mesh
-# TODO output the sorted array after filling holes
-# TODO get rid of crazy faces
 def mesh_and_render(data_list):
     for data in data_list:
 
@@ -74,16 +71,17 @@ def mesh_and_render(data_list):
         current_pnt = identify_reference_pnt(mapped_pnts, L, verbose=False)
         ref_insp, ref_exp = define_insp_and_exp_frame(current_pnt, mapped_pnts)
 
-        # setting the scence
-        # Import libraries
+        #close holes in mesh
+        mapped_pnts_int, L_int = repair_holes(mapped_pnts, L, grid_size_cols)
+
         frame = ref_exp
         base_frame = ref_insp
         pf.amplified = False
-        reference_mesh = polygonize_frame(base_frame, mapped_pnts, L,
+        reference_mesh = polygonize_frame(base_frame, mapped_pnts_int, L_int,
                                           verbose=False,
                                           export_name=pf.target_path + '/' +
                                                       str(mouse) + '_expiration.ply', mouse=mouse)
-        moved_mesh = polygonize_frame(frame, mapped_pnts, L,
+        moved_mesh = polygonize_frame(frame, mapped_pnts_int, L_int,
                                       verbose=False,
                                       export_name=pf.target_path + '/' +
                                                   str(mouse) + '_inspiration.ply', mouse=mouse)
@@ -105,14 +103,15 @@ def mesh_and_render(data_list):
             # Render and do NOT close
             plotter.show(auto_close=False)
             # Run through each frame
-            for fr in tf.tqdm(range(mapped_pnts.shape[2])):
-                mesh_at_frame = polygonize_frame(fr, mapped_pnts, L, verbose=False, mouse=mouse)
+            for fr in tf.tqdm(range(mapped_pnts_int.shape[2])):
+                mesh_at_frame = polygonize_frame(fr, mapped_pnts_int, L_int, verbose=False, mouse=mouse)
                 distance = compute_distances(reference_mesh, mesh_at_frame)
                 mesh_at_frame['Distances'] = distance
                 plotter.add_mesh(mesh_at_frame,
                                  scalars='Distances',
                                  cmap=cmap,
-                                 clim=[-np.max(np.abs(distance)), np.max(np.abs(distance))],
+                                 #clim=[-np.max(np.abs(distance)), np.max(np.abs(distance))],
+                                 clim = [-1.5, 1],
                                  show_edges=True,
                                  smooth_shading=True
                                  )
@@ -265,15 +264,15 @@ def repair_holes(mapped_pnts, index_map, grid_size_cols):
     id_to_index = {ID: index for index, ID in enumerate(index_map)}
     # Sort index_map and mapped_pnts based on index_map
     sorted_indices = sorted(range(len(index_map)), key=lambda k: index_map[k])
-    index_map_int = copy.deepcopy([index_map[i] for i in sorted_indices])
-    mapped_pnts_int = copy.deepcopy(mapped_pnts[sorted_indices])
-
+    index_map_sorted = copy.deepcopy([index_map[i] for i in sorted_indices])
+    mapped_pnts_int = copy.deepcopy(mapped_pnts)
+    index_map_int = copy.deepcopy(index_map)
     gaps = []
 
-    for i in range(1, len(index_map_int)):
-        if index_map_int[i] - index_map_int[i - 1] > 1:
+    for i in range(1, len( index_map_sorted)):
+        if  index_map_sorted[i] -  index_map_sorted[i - 1] > 1:
             # There's a gap between consecutive IDs in index_map
-            gaps.append(index_map_int[i - 1] + 1)
+            gaps.append(index_map_sorted[i - 1] + 1)
 
     for ID in gaps:
         r = np.floor(ID / grid_size_cols)
@@ -284,6 +283,10 @@ def repair_holes(mapped_pnts, index_map, grid_size_cols):
         # If all neighbors of this gap ID are present, interpolate
         if all([neigh in id_to_index for neigh in neighbours]):
             interpolated_values = np.zeros((3, mapped_pnts_int.shape[2]))
+            #xn1 = mapped_pnts_int[id_to_index[3242], 0, 0]
+            #yn1 = mapped_pnts_int[id_to_index[3242], 1, 0]
+            #zn1 = mapped_pnts_int[id_to_index[3242], 2, 0]
+
             for frame in range(mapped_pnts_int.shape[2]):
                 x_sum = sum([mapped_pnts_int[id_to_index[neigh], 0, frame] for neigh in neighbours])
                 y_sum = sum([mapped_pnts_int[id_to_index[neigh], 1, frame] for neigh in neighbours])
@@ -354,15 +357,59 @@ def visualize_difference(ref_mesh, motion_mesh, distances):
     plotter.show()
     return motion_mesh
 
+def filter_bad_faces(m, area_th, angle_th):
+    #created a mask for face angles
+
+    # get triangles
+    v0 = m.points[m.faces.reshape(-1, 4)[:, 1]]
+    v1 = m.points[m.faces.reshape(-1, 4)[:, 2]]
+    v2 = m.points[m.faces.reshape(-1, 4)[:, 3]]
+    # get triangle side vectors
+    a = v1-v2
+    b = v0-v2
+    c = v1 - v0
+    d = v2 - v0
+    #get triangle angles
+    angles = []
+    for aa, bb, cc, dd in zip(a, b, c, d):
+        alpha = np.arccos(np.dot(aa, bb) / (np.linalg.norm(aa) * np.linalg.norm(bb)))
+        beta = np.arccos(np.dot(cc, dd) / (np.linalg.norm(cc) * np.linalg.norm(dd)))
+        gamma = np.pi - alpha - beta
+        alpha = np.rad2deg(alpha)
+        beta = np.rad2deg(beta)
+        gamma = np.rad2deg(gamma)
+        if (alpha<angle_th or beta<angle_th or gamma<angle_th):
+            angles.append(True)
+        else: angles.append(False)
+
+    # create a mask for face areas
+    areas = m.compute_cell_sizes()["Area"]
+
+    #make a mask
+    max_ar_sor = np.sort(areas)
+    areas = areas > max_ar_sor[int(area_th/100*len(max_ar_sor))]
+    #combine mask
+    mask = np.logical_and(areas,angles)
+    #cleanup
+    faces = m.faces.reshape((-1, 4))
+
+    # Filter out the unwanted faces based on the delete_mask
+    filtered_faces = faces[~mask]
+
+    # Constructing a new PolyData with the same points and the filtered faces
+    clean_mesh = pv.PolyData(m.points, filtered_faces, deep=True)
+
+    return clean_mesh
 
 def polygonize_frame(frame, mapped_pnts, L, verbose=False, export_name=None, mouse=''):
     print(mapped_pnts[0,:,frame])
-    mapped_pnts, L = repair_holes(mapped_pnts, L, grid_size_cols)
     vertex_l, face_l = polygonize(mapped_pnts[:, :, frame], L)
     mesh = pv.PolyData(vertex_l, face_l, int(len(face_l) / 3))
+    filtered_mesh  = filter_bad_faces(mesh, 80, 15)
     # print(vertex_l)
     if not (export_name is None):
         mesh.save(export_name)
+        #filtered_mesh.save(pf.target_path+ '/' +str(mouse) + '_filtered.ply')
     # current_frame = frame
     if verbose:
         plotter = pv.Plotter()
@@ -372,4 +419,4 @@ def polygonize_frame(frame, mapped_pnts, L, verbose=False, export_name=None, mou
         # Set title
         plotter.set_title('mouse:' + mouse + ' frame:' + str(frame))
         plotter.show()
-    return mesh
+    return filtered_mesh

@@ -5,7 +5,7 @@ import_folder = "/Users/angelika.svetlove/research files/Optolufu_fibrosis/test/
 # where everything should be saved
 target_path = "/Users/angelika.svetlove/research files/Optolufu_fibrosis/out/"
 # folder where all the calibration images are stored
-import_calib_folder = '/Volumes/Optolufu_2/Optolufu_II_Fibrosis/rot_inv_pattern'
+import_calib_folder = '/Users/angelika.svetlove/research files/Optolufu_fibrosis/test/rot_inv_pattern copy/'
 # path to save or to pull from
 saved_calib_path = "/Users/angelika.svetlove/research files/Optolufu_fibrosis/out/"
 

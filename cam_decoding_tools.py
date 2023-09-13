@@ -146,7 +146,6 @@ def decode_track_solve_all(mice, cmtx, cRot, cTrans, Verbose=False):
         data_list.append({'mouse': mouse, 'mapped_pnts': mapped_pnts, 'index_map': index_map})
     return data_list
 
-
 ######################################################################
 # Helper functions
 ######################################################################
