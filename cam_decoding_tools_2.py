@@ -5,9 +5,13 @@ import matplotlib.pyplot as plt
 from skimage import io
 from skimage.segmentation import flood
 from skimage.morphology import binary_erosion
-from skimage import measure
+from skimage import measure, filters
 from sklearn.neighbors import NearestNeighbors
-
+import cv2
+import paths_and_flags as pf
+from skimage.segmentation import clear_border
+import plotly.graph_objects as go
+import pickle
 ##############################################################################
 # how many encoding cycles
 repeats = 3
@@ -17,7 +21,7 @@ encoding_planes = 13
 frames_per_encoding_plane = 10
 # deal with different magnification of the 4 different cameras
 camera_size_factors = [1, 1, 2, 2]
-# size for neighborhood check
+# size for neighbourhood check
 neighborhood_size = 6
 # encoding line length
 encoding_line_length = 63
@@ -26,7 +30,7 @@ encoding_line_length = 63
 ######################################################################
 # 4 cam
 def decode_track_solve_all(mouse, cmtx, cRot, cTrans, cam_number, Verbose=False):
-    #data_list = []
+    # data_list = []
 
     # generate matrix in DLT style
     PA = cmtx[0] @ np.concatenate([cRot[0, :, :], np.expand_dims(cTrans[0], axis=1)], axis=-1)
@@ -37,7 +41,9 @@ def decode_track_solve_all(mouse, cmtx, cRot, cTrans, cam_number, Verbose=False)
 
     print('\ntracking mouse ...', mouse, '\n')
     streams = []
-    streams.append(str(mouse) + '/cameraB.TIF') # reference camera goes first
+    #streams.append(str(mouse) + '/cameraB.TIF')
+    #streams.append(str(mouse) + '/cameraA.TIF')
+    streams.append(str(mouse) + '/cameraB.TIF')  # reference camera goes first
     streams.append(str(mouse) + '/cameraD.TIF')
     streams.append(str(mouse) + '/cameraA.TIF')
     streams.append(str(mouse) + '/cameraC.TIF')
@@ -48,12 +54,18 @@ def decode_track_solve_all(mouse, cmtx, cRot, cTrans, cam_number, Verbose=False)
     index_map = []
 
     print('\nstart decoding process ...')
-    for c in range(0,cam_number):
+    for c in range(0, cam_number):
         # analyze stream
+
         E, st, en = analyze_stream(streams[c], Verbose, 'mouse:' + mouse + ' stream:' + streams[c])
         # load stream data
         I = io.imread(streams[c])[st:en, :, :]
-        S = I > np.max(I) * .5
+
+        # print(np.percentile(S, 90))
+        # print("Threshold: ", np.max(S) * 0.45)
+        val = filters.threshold_otsu(I)
+        print(f"Threshold: {val}")
+        S = I > (val-10)
         S = S.astype(dtype='uint8')
         image_data.append(S)
 
@@ -66,20 +78,39 @@ def decode_track_solve_all(mouse, cmtx, cRot, cTrans, cam_number, Verbose=False)
         if os.path.exists(msk_filepath):
             msk = io.imread(msk_filepath) > 0
         else:
-            print (image_data[c][0].shape)
+            print(image_data[c][0].shape)
             polygon_drawer = tf.PolygonDrawerMatplotlib(image_data[c][0])
             msk = polygon_drawer.run()
-            #save for next time
+            # save for next time
             io.imsave(msk_filepath, msk)
         # shrink the mask
         msk = binary_erosion(msk, np.ones((5, 5)))
-        d = decode_alg(E, msk, None, False, camera_size_factors[c])
-        if Verbose:
+        d = decode_alg(E, msk, verbose=False, sf=camera_size_factors[c])
+        '''if Verbose:
             plt.figure(figsize=(19, 10))
             for i in range(d.shape[0]):
                 plt.plot(d[i, 1], d[i, 2], 'o')
                 plt.annotate(str(d[i, 0]), (d[i, 1], d[i, 2]))
-            plt.show()
+            plt.show()'''
+        if Verbose:
+            x_vals = [item[1] for item in d]
+            y_vals = [item[2] for item in d]
+            text = [str(int(item[0])) for item in d]
+            fig = go.Figure()
+            fig.layout.autosize = False
+            fig.layout.height= 1280
+            fig.layout.width = 960
+            fig.layout.plot_bgcolor = 'white'
+            fig.add_trace(go.Scatter(
+                x=x_vals,
+                y=y_vals,
+                mode="markers+text",
+                text=text,
+                fillcolor='blue',
+                textposition="top center"
+
+            ))
+            fig.show()
 
         # list must be duplicate free
         d = remove_duplicates(d)
@@ -88,11 +119,11 @@ def decode_track_solve_all(mouse, cmtx, cRot, cTrans, cam_number, Verbose=False)
         # data.append({'stream':streams[c],'frames':E,'start_seq':st,'end_seq':en,'mask':msk,'codes':d})
         decode_list.append(np.copy(d))
 
-        #plt.figure(figsize=(19, 10))
-        #for i in range(d.shape[0]):
-         #   plt.plot(d[i, 1], d[i, 2], '*')
-         #   plt.annotate(str(d[i, 0]), (d[i, 1], d[i, 2]))
-       # plt.show()
+        # plt.figure(figsize=(19, 10))
+        # for i in range(d.shape[0]):
+        #   plt.plot(d[i, 1], d[i, 2], '*')
+        #   plt.annotate(str(d[i, 0]), (d[i, 1], d[i, 2]))
+        # plt.show()
         for code in d[:, 0]:
             pos = index_of(int(code), codes_found)
             if pos == -1:
@@ -114,31 +145,47 @@ def decode_track_solve_all(mouse, cmtx, cRot, cTrans, cam_number, Verbose=False)
         image_data[cp] = image_data[cp][:length, :, :]
 
     print('\nstart tracking process ...')
-    #Tracking starts
-    if cam_number==2:
+    # Tracking starts
+    if cam_number == 2:
         multitutde = (1,)
-    else: multitutde = (1,2,3,4)
+    else:
+        multitutde = (1, 2, 3, 4)
+
+
+    data_structure = {}
+    irreg = []
     for mult in multitutde:
         mult_codes = codes_found[codes_found[:, 1] == mult]
         print('\nAnalysing points with a multitude of ' + str(mult + 1))
+
         for mcode_id in tf.tqdm(range(mult_codes.shape[0])):
             # we need the point to be visible in camB -> bit 1 must be set
             if mult_codes[mcode_id, 2] & 0b0010 > 0:
+                if mcode_id not in data_structure:
+                    data_structure[mcode_id] = {}
                 DLT_P = []
                 DLT_Tracks = []
-                for cam in range(0,cam_number):
+                for cam in range(0, cam_number):
                     # print('camera_id',c)
                     # print('code',mult_codes[mcode_id,:])
+
                     if mult_codes[mcode_id, 2] & pow(2, cam) > 0:
                         # generate matrix
                         DLT_P.append(P[:, :, cam].flatten())
                         # track in camera
                         code_cam_id = np.where(decode_list[cam][:, 0] == mult_codes[mcode_id, 0])[0]
                         lastp = np.squeeze(np.copy(decode_list[cam][code_cam_id, 1:3]))
-                        DLT_Tracks.append(tracking(image_data[cam], image_data[cam].shape[0], lastp))
+                        track = tracking2(image_data[cam], image_data[cam].shape[0], lastp)
+                        #irregularity = np.std(np.sqrt(np.sum(np.diff(track, axis=0)**2, axis=1)))
+                        irregularity = np.sqrt((track[0][0]-track[1480][0])**2+(track[0][1]-track[1480][1])**2)
+                        if (irregularity>20):
+                            print (f"code ID {mult_codes[mcode_id, 0]}, irreg: {irregularity}")
+                            irreg.append(mcode_id)
+                            bad_tracks(image_data[cam], image_data[cam].shape[0], lastp, pf.target_path+f"/temp/{mult_codes[mcode_id, 0]}/")
+                        DLT_Tracks.append(track)
+                        data_structure[mcode_id][cam] = track
                 DLT_Tracks = np.array(DLT_Tracks)
                 # print(DLT_Tracks.shape)
-
                 # perform DLT
                 conv_pos = np.zeros((3, DLT_Tracks.shape[1]))
                 for frame_id in range(DLT_Tracks.shape[1]):
@@ -148,8 +195,10 @@ def decode_track_solve_all(mouse, cmtx, cRot, cTrans, cam_number, Verbose=False)
                 mapped_pnts.append(conv_pos)
                 index_map.append(mult_codes[mcode_id, 0])
 
-    #data_list.append({'mouse': mouse, 'mapped_pnts': mapped_pnts, 'index_map': index_map})
+    # data_list.append({'mouse': mouse, 'mapped_pnts': mapped_pnts, 'index_map': index_map})
+    draw_correspondence_t(data_structure, image_data, pf.target_path+'/temp/'+str(mouse)+'/')
     return np.asarray(mapped_pnts), index_map
+
 
 ######################################################################
 # Helper functions
@@ -173,48 +222,31 @@ def intersection_pos(v, lvl):
 def phases(I, verbose=False):
     v = np.average(I, axis=(1, 2))
     lvl = np.max(v) * .9
+    #lvl = filters.threshold_otsu(v)-5.0
     mi = np.min(v)
-    ipos = intersection_pos(v, lvl)
-    if verbose:
-        print('intersection positions = ', ipos)
-    pos = 0
+    ind = np.argwhere(v>lvl)
     encode = []
-
-    # startpos_encoding = int((ipos[0]+ipos[1])/2)
-    encoding_inc = frames_per_encoding_plane
-
+    start = int(ind[0])
+    stop = 0
     for i in range(0, repeats):
-        startpos_encoding = ipos[pos] + 4
-        encoding_vec = np.linspace(0, encoding_planes - 1, encoding_planes) * encoding_inc + startpos_encoding
-        encoding_vec = encoding_vec.astype(dtype='int')
+        stop = int(start + frames_per_encoding_plane*encoding_planes)
+        step = int(np.floor(frames_per_encoding_plane/2))
+        encoding_vec = list(range(start+step, stop+1, frames_per_encoding_plane))
+        start = stop+frames_per_encoding_plane # extra frames account for the dark phase
         encode.append(encoding_vec)
-        pos = pos + 4
-
-    if verbose:
-        plt.figure(figsize=(19, 5))
-        plt.plot(np.linspace(0, len(v[:ipos[-2]]) - 1, len(v[:ipos[-2]])), v[:ipos[-2]], 'b-')
-        plt.plot([0, len(v[:ipos[-2]]) - 1], [lvl, lvl], 'r-')
-        # plt.plot(np.linspace(0,len(v)-1,len(v)),v,'b-')
-        # plt.plot([0,len(v)-1],[lvl,lvl],'r-')
-        # print('positions ',ipos)
-        for p in ipos[:len(ipos) - 1]:
-            plt.plot(p, v[p], 'r*', markersize=12)
-        for encoding_phase in encode:
-            for e in encoding_phase:
-                plt.plot([e, e], [mi, lvl * 1.1], 'g-')
-
-    return encode, encoding_inc, ipos[-2], ipos[-1]
+    return encode, start, ind[-1]
 
 
 # analyse one camera
 def analyze_stream(camA_stream, verbose=False, title=''):
     I = io.imread(camA_stream)
-    # print('shape ',I.shape)
+    #I = I[0:3000, :,:] # only for this one plethysmograohy run, delete me in the future
+    print('shape ',I.shape)
     # plt.figure()
     # plt.imshow(I[0,150:250,200:300])
     # plt.show()
-    enc, inc, start, end = phases(I, verbose)
-    enc = np.array(enc)
+    enc, start, end = phases(I, verbose)
+    enc = np.array(enc, dtype='int')
     # print(enc)
     E = []
     for e in range(0, enc[0].shape[0]):
@@ -222,7 +254,7 @@ def analyze_stream(camA_stream, verbose=False, title=''):
         for r in range(0, repeats):
             I_stk.append(I[enc[r, e], :, :])
         # E.append(np.median(np.array(I_stk),axis=0))
-        E.append(np.average(np.array(I_stk), axis=0))
+        E.append(np.median(np.array(I_stk), axis=0))
 
     E = np.array(E)
     if verbose:
@@ -237,62 +269,45 @@ def analyze_stream(camA_stream, verbose=False, title=''):
         fig.suptitle(title)
         plt.show()
 
-    return E, start, end
+    return E, int(start), int(end)
 
 
 # decoding algorithm
-def decode_alg(E, msk, roi=None, verbose=False, sf=1):
-    try:
-        if msk == None:
-            msk = np.ones((E.shape[1], E.shape[2]))
-    except:
-        pass
-    try:
-        if roi == None:
-            roi = [0, E.shape[1], 0, E.shape[2]]
-    except:
-        pass
+def decode_alg(E, msk, verbose=False, sf=1):
+    THRESHOLD_BIT = 0.20
+    MAX_AREA_MULTIPLIER = 150
+    MIN_AREA_BASE = 5
+    #MIN_AREA_MULTIPLIER = 5
+    search_roi = 6
+    half_window = int(search_roi * sf / 2)
 
-    # unsharpen
-    # kernel = np.ones((sf*2+1,sf*2+1),np.float32)/25
-    # for i in range(0,E.shape[0]):
-    #    E[i,:,:] = cv2.filter2D(E[i,:,:],-1,kernel)
-
-    range_min = np.min(E)
     range_max = np.max(E)
 
-    # find positions ins static frame
-    S = E[0, :, :] * msk
-    S = S[roi[0]:roi[1], roi[2]:roi[3]]
-    omsk = np.copy(msk)
-    msk = msk[roi[0]:roi[1], roi[2]:roi[3]]
+    # find positions in static frame
+    static_pattern = E[0, :, :] * msk
+    upper_threshold, lower_threshold = tf.live_thresholding(static_pattern)
+    #val = filters.threshold_otsu(static_pattern[static_pattern > 20])
+    #print(f"Threshold here: {lower_threshold}")
 
-    ma = np.max(S)
-    S = S > ma * .5
-    # S = img_as_ubyte(S)
-    S = S.astype(dtype='uint8')
 
-    for i in range(0, msk.shape[0]):
-        msk[i, 0] = 0
-        msk[i, msk.shape[1] - 1] = 0
-    for i in range(0, msk.shape[1]):
-        msk[0, i] = 0
-        msk[msk.shape[0] - 1, i] = 0
-    msk = 1 - msk
+    # Threshold the stream
+    static_pattern = static_pattern>lower_threshold
+    static_pattern = static_pattern.astype(dtype='uint8')
 
-    # MD = cv2.distanceTransform(S, cv2.DIST_L2, 3) > 1
-    # 1st pass
-    # blobs_labels = measure.label(MD, background=0)
-    blobs_labels = measure.label(S, background=0)
-    # remove labels touching edge of mask
-    edge = blobs_labels * msk
-    tab = measure.regionprops_table(edge.astype(dtype='uint8'))
-    for l in tab['label']:
-        blobs_labels = blobs_labels - (blobs_labels == l) * l
+    #inv_msk = ~msk
+    #static_filtered = inv_msk & static_pattern
+    '''msk[0, :] = 0
+    msk[-1, :] = 0
+    msk[:, 0] = 0
+    msk[:, -1] = 0
+'''
+    blobs_labels = measure.label(static_pattern, background=0)
+    blobs_labels = clear_border(blobs_labels, mask=msk)
+
     # remove labels outside size range
     tab = measure.regionprops_table(blobs_labels, properties=['label', 'area'])
     for i in range(0, len(tab['label'])):
-        if tab['area'][i] < 5 + (sf - 1) * 15 or tab['area'][i] > 100 * sf:
+        if tab['area'][i] < MIN_AREA_BASE * sf or tab['area'][i] > MAX_AREA_MULTIPLIER * sf:
             blobs_labels = blobs_labels - (blobs_labels == tab['label'][i]) * tab['label'][i]
 
     # final pass get centroid
@@ -301,28 +316,48 @@ def decode_alg(E, msk, roi=None, verbose=False, sf=1):
     # cpy into vector
     decode = np.zeros((len(tab['label']), 3))
     decode[:, 0] = 0
-    decode[:, 1] = tab['centroid-1']
-    decode[:, 2] = tab['centroid-0']
+    decode[:, 1] = tab['centroid-1'] #x coord
+    decode[:, 2] = tab['centroid-0'] #y coord
 
+    pos_track = np.zeros((len(tab['label']), encoding_planes))
     for i in range(0, decode.shape[0]):
         # for i in range(0,1):
-        if verbose:
-            plt.figure(figsize=(19, 3))
-        for f in range(0, encoding_planes - 1):  # we remove the static pattern at the beginning
+        #if verbose:
+            #plt.figure(figsize=(19, 3))
+        for f in range(1, encoding_planes):  # we remove the static pattern at the beginning
             # get frame
-            F = E[f + 1, :, :] * omsk
-            F = F[roi[0]:roi[1], roi[2]:roi[3]]
+            F = E[f, :, :] * msk
+            range_max = np.max(F)
+            otsu_threshold = filters.threshold_otsu(F)
 
-            # ma = np.max(F)
-            # F = F>ma*.8
-            # F = F.astype(dtype='uint8')
-            # F = cv2.distanceTransform(F, cv2.DIST_L2, 3) > 1
 
-            bit = np.average(F[max(int(decode[i, 2]) - (4 - sf), 0):min(F.shape[0], int(decode[i, 2]) + 3 + sf), \
-                             max(0, int(decode[i, 1]) - (4 - sf)):min(F.shape[1],
-                                                                      int(decode[i, 1]) + 3 + sf)]) > range_max * .2
+            y_start = max(0, int(decode[i, 2]) - half_window)
+            y_end = min(F.shape[0], int(decode[i, 2]) + half_window)
 
-            decode[i, 0] = decode[i, 0] + bit * 2 ** f
+            x_start = max(0, int(decode[i, 1]) - half_window)
+            x_end = min(F.shape[1], int(decode[i, 1]) + half_window)
+
+            # Get the cropped region
+            region = F[y_start:y_end, x_start:x_end]
+
+            # Compute the Otsu threshold for the region
+
+            #otsu_threshold = filters.threshold_otsu(region)
+
+            # Calculate the number of pixels above the Otsu threshold
+            above_threshold_count = np.sum(region > otsu_threshold)
+
+            # Calculate the total number of pixels in the region
+            total_pixels = region.size
+
+            # Calculate the percentage of pixels above the Otsu threshold
+            percentage_above_threshold = (above_threshold_count / total_pixels) * 100
+
+            # Set the bit to True if the percentage is above 50%
+            bit = percentage_above_threshold > 20
+
+            # Update the decode matrix
+            decode[i, 0] = decode[i, 0] + bit * 2 ** (f - 1)
 
             if verbose:
                 ax = plt.subplot(1, encoding_planes, encoding_planes - f)
@@ -330,26 +365,14 @@ def decode_alg(E, msk, roi=None, verbose=False, sf=1):
                 ax.plot(decode[i, 1], decode[i, 2], 'r*', markersize=1)
                 ax.set_title(str(int(bit)))
                 ax.axis(False)
-
-            #
-            # if bit>0:
-            #    RG = flood(F,(int(decode[i,3]),int(decode[i,2])),tolerance=30)
-            #    tab = measure.regionprops_table(RG.astype(dtype='uint8'),properties=['label','centroid','area'])
-            #    decode[i,2]=tab['centroid-1'][0]
-            #    decode[i,3]=tab['centroid-0'][0]
-            # else:
-            #    RG = np.zeros(F.shape)
-
-            # ax = plt.subplot(122)
-            # ax.imshow(RG)
         if verbose:
             plt.suptitle(str(int(decode[i, 0])))
             plt.show()
 
     if verbose:
-        plt.figure(figsize=(19, 10))
+        '''plt.figure(figsize=(19, 10))
         ax = plt.subplot(221)
-        ax.imshow(S)
+        ax.imshow(static_pattern)
         plt.gca().set_title('static frame')
 
         for i in range(0, decode.shape[0]):
@@ -358,9 +381,9 @@ def decode_alg(E, msk, roi=None, verbose=False, sf=1):
 
         ax = plt.subplot(222)
         ax.imshow(blobs_labels)
-        ax = plt.subplot(223)
-        ax.imshow(edge)
+        ax = plt.subplot(223)'''
 
+    plt.close('all')
     return decode
 
 
@@ -421,50 +444,107 @@ def index_of(pattern, codes):
         if codes[i][0] == pattern:
             pos = i
     return pos
-
-
-# tracking algorithm
-def tracking(S, max_frames, lastp):
+def bad_tracks (S, max_frames, lastp, output_dir):
+    print("Outputting visual for bad track")
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    # Setup trace array with the first point as the init
     trace = np.zeros((max_frames, 2))
-    roi_size = 20
-    stp = np.copy(lastp)
+    trace[0, 0] = lastp[0]
+    trace[0, 1] = lastp[1]
+    # Setup velocity tracking for modified ROI generation
+    velocities = np.zeros((max_frames, 2))
+    old_frame = S[0]
+    max_velocity_change = 10.0
+    roi_size = 10
+    for frame_id in range(1, max_frames):
+        # Last point on previous frame
+        p0x = int(trace[frame_id-1][0])
+        p0y = int(trace[frame_id-1][1])
 
-    # for frame_id in tqdm(range(max_frames),desc='tracking frame'):
-    for frame_id in range(max_frames):
-        swr = max(0, int(lastp[1]) - roi_size)
-        ewr = min(S.shape[1] - 1, int(lastp[1]) + roi_size)
-        swc = max(0, int(lastp[0]) - roi_size)
-        ewc = min(S.shape[2] - 1, int(lastp[0]) + roi_size)
+        # Dynamic ROI based on predicted movement
+        # Last velocity as predictor
+        #roi_size += int(np.linalg.norm(velocities[frame_id - 1]))
+        swr, ewr = max(0, p0y - roi_size), min(S.shape[1] - 1, p0y + roi_size)
+        swc, ewc = max(0, p0x - roi_size), min(S.shape[2] - 1, p0x + roi_size)
 
-        # print(swr,ewr,swc,ewc)
+        # Define the ROI in the frame
+        roi_frame = S[frame_id, swr:ewr, swc:ewc]
 
-        ROI = np.squeeze(S[frame_id, swr:ewr + 1, swc:ewc + 1])
-        pos = [lastp[0] - swc, lastp[1] - swr]
-
-        # Region growing
-        RG = flood(ROI, (int(pos[1]), int(pos[0]))) #row, col notation
+        # Grow under last centroid within the dynamic ROI
+        RG = flood(roi_frame, (int(p0y - swr), int(p0x - swc)))  # adjust with ROI starting point
         tab = measure.regionprops_table(RG.astype(dtype='uint8'), properties=['label', 'centroid', 'area'])
-        lastp[0] = tab['centroid-1'][0]
-        lastp[1] = tab['centroid-0'][0]
+        p1x = tab['centroid-1'][0] + swc
+        p1y = tab['centroid-0'][0] + swr
 
-        # ax=plt.subplot(121)
-        # ax.imshow(ROI,cmap='Greys_r')
-        # ax.plot(pos[0],pos[1],'r*')
-        # ax=plt.subplot(122)
-        # ax.imshow(RG)
-        # ax.plot(lastp[0],lastp[1],'r*')
-        # plt.show()
+        output = roi_frame * RG
+        output = output.astype("uint8")*255
+        output = cv2.cvtColor(output, cv2.COLOR_GRAY2RGB)
+        cv2.circle(output, (int(p1x - swc), int(p1y - swr)), 1, (0, 255, 0), -1)  # Draw point for cam1
+        #cv2.putText(output, f"x: {p1x}, y: {p1y}", (5, 15), cv2.FONT_HERSHEY_SIMPLEX,0.05, (0, 255, 0), 2, cv2.LINE_AA)
+        filename = os.path.join(output_dir, f"frame_{frame_id:04d}.png")
+        cv2.imwrite(filename, output)
 
-        # correct for ROI pos
-        lastp[0] = lastp[0] + swc
-        lastp[1] = lastp[1] + swr
-
-        trace[frame_id, 0] = lastp[0]
-        trace[frame_id, 1] = lastp[1]
-
-    # print('tracking start',stp,'end',lastp,'length',trace.shape[0])
+        # Check point velocity change
+        current_velocity = np.array([p1x, p1y]) - np.array([p0x, p0y])
+        if np.linalg.norm(current_velocity) > max_velocity_change:
+            # Predict point movement based on last known position
+            trace[frame_id] = trace[frame_id - 1] + velocities[frame_id - 1]
+            print (f"Frame: {frame_id}, pnt_x, y:{trace[0,0], trace[0,1]}")
+            velocities[frame_id] = velocities[frame_id - 1]  # Store the previous velocity as the current frame's velocity
+        else:
+            trace[frame_id] = [p1x, p1y]
+            velocities[frame_id] = np.array(current_velocity)
     return trace
 
+def tracking2(S, max_frames, lastp):
+    # Setup trace array with the first point as the init
+    trace = np.zeros((max_frames, 2))
+    trace[0, 0] = lastp[0]
+    trace[0, 1] = lastp[1]
+    # Setup velocity tracking for modified ROI generation
+    velocities = np.zeros((max_frames, 2))
+    old_frame = S[0]
+    max_velocity_change = 10.0
+    roi_size = 10
+    for frame_id in range(1, max_frames):
+        # Last point on previous frame
+        p0x = int(trace[frame_id-1][0])
+        p0y = int(trace[frame_id-1][1])
+
+        # Dynamic ROI based on predicted movement
+        # Last velocity as predictor
+        #roi_size += int(np.linalg.norm(velocities[frame_id - 1]))
+        swr, ewr = max(0, p0y - roi_size), min(S.shape[1] - 1, p0y + roi_size)
+        swc, ewc = max(0, p0x - roi_size), min(S.shape[2] - 1, p0x + roi_size)
+
+        # Define the ROI in the frame
+        roi_frame = S[frame_id, swr:ewr, swc:ewc]
+        #If centroid has a blob under it
+        if roi_frame[p0y-swr,p0x-swc] == 1: #row column
+            # Grow under last centroid within the dynamic ROI
+            RG = flood(roi_frame, (int(p0y - swr), int(p0x - swc)))  # adjust with ROI starting point
+            tab = measure.regionprops_table(RG.astype(dtype='uint8'), properties=['label', 'centroid', 'area'])
+            p1x = tab['centroid-1'][0] + swc
+            p1y = tab['centroid-0'][0] + swr
+            # Check point velocity change
+            current_velocity = np.array([p1x, p1y]) - np.array([p0x, p0y])
+            # Check the motion irregularity based on velocity
+            if np.linalg.norm(current_velocity) > max_velocity_change:
+                # Predict point movement based on last known position
+                trace[frame_id] = trace[frame_id - 1] + velocities[frame_id - 1]
+                print (f"Frame: {frame_id}, pnt_x, y:{trace[0,0], trace[0,1]}")
+                velocities[frame_id] = velocities[frame_id - 1]  # Store the previous velocity as the current frame's velocity
+            else: # Regular movement
+                trace[frame_id] = [p1x, p1y]
+                velocities[frame_id] = np.array(current_velocity)
+        # If centroid has void under it - predict centroid on last known velocity
+        else:
+            #trace[frame_id] = trace[frame_id - 1] + velocities[frame_id - 1]
+            trace[frame_id] = trace[frame_id - 1]
+            velocities[frame_id] = velocities[frame_id - 1]
+
+    return trace
 
 def remove_duplicates(d):
     unique_list = []
@@ -532,3 +612,39 @@ def DLTrecon(nd, nc, Ls, uvs):
         xyz = Vh[-1, 0:-1] / Vh[-1, -1]
 
     return xyz
+
+def draw_correspondence_t(data_tracks, image_data, output_dir):
+    # Create an output directory if it doesn't exist
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+
+    # Determine video properties
+    height, width = image_data[0][0].shape
+    out_width = 2 * width
+
+    # For each frame
+    for frame_id in range(len(image_data[0])):
+        # Create an empty frame with both camera views side by side
+        frame = np.zeros((height, out_width))
+        frame[:, :width] = image_data[0][frame_id]
+        frame[:, width:] = image_data[1][frame_id]
+        frame = frame.astype("uint8")*255
+        frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2RGB)
+        # Loop over all the mcodes
+        for mcode_id, tracks in data_tracks.items():
+            if len(tracks) > 1:  # Ensure we have data for both cameras
+                point_cam1 = tracks[0][frame_id]
+                point_cam2 = tracks[1][frame_id]
+                point_cam2 = (point_cam2[0] + width, point_cam2[1])  # Adjust x coordinate for side by side view
+
+                cv2.circle(frame, (int(point_cam1[0]),int(point_cam1[1])) , 3, (0, 255, 0), -1)  # Draw point for cam1
+                cv2.circle(frame, (int(point_cam2[0]),int(point_cam2[1])) , 3, (0, 0, 255), -1)  # Draw point for cam2
+
+                # Draw line between the points
+                cv2.line(frame, (int(point_cam1[0]),int(point_cam1[1])), (int(point_cam2[0]),int(point_cam2[1])), (255, 255, 255), 1)
+
+        # Save the frame as an image
+        filename = os.path.join(output_dir, f"frame_{frame_id:04d}.png")
+        cv2.imwrite(filename, frame)
+
+
